@@ -4,7 +4,7 @@
 //
 //  Created by kintan on 2018/10/31.
 //
-#if canImport(UIKit) && canImport(CallKit)
+#if canImport(UIKit)
 import AVKit
 import Combine
 import CoreServices
