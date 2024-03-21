@@ -11,20 +11,67 @@ import CoreMedia
 #if canImport(MetalKit)
 import MetalKit
 #endif
-public final class MetalPlayView: UIView {
-    private var videoInfo: CMVideoFormatDescription?
-    public private(set) var pixelBuffer: CVPixelBuffer?
+public protocol DisplayLayerDelegate: NSObjectProtocol {
+    func change(displayLayer: AVSampleBufferDisplayLayer)
+}
+
+public protocol VideoOutput: FrameOutput {
+    var displayLayerDelegate: DisplayLayerDelegate? { get set }
+    var options: KSOptions { get set }
+    var displayLayer: AVSampleBufferDisplayLayer { get }
+    var pixelBuffer: PixelBufferProtocol? { get }
+    init(options: KSOptions)
+    func invalidate()
+    func play()
+    func readNextFrame()
+}
+
+public final class MetalPlayView: UIView, VideoOutput {
+    public var displayLayer: AVSampleBufferDisplayLayer {
+        displayView.displayLayer
+    }
+
+    private var isDovi: Bool = false
+    private var formatDescription: CMFormatDescription? {
+        didSet {
+            options.updateVideo(refreshRate: fps, isDovi: isDovi, formatDescription: formatDescription)
+        }
+    }
+
+    private var fps = Float(60) {
+        didSet {
+            if fps != oldValue {
+                if KSOptions.preferredFrame {
+                    let preferredFramesPerSecond = ceil(fps)
+                    if #available(iOS 15.0, tvOS 15.0, macOS 14.0, *) {
+                        displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: preferredFramesPerSecond, maximum: 2 * preferredFramesPerSecond, __preferred: preferredFramesPerSecond)
+                    } else {
+                        displayLink.preferredFramesPerSecond = Int(preferredFramesPerSecond) << 1
+                    }
+                }
+                options.updateVideo(refreshRate: fps, isDovi: isDovi, formatDescription: formatDescription)
+            }
+        }
+    }
+
+    public private(set) var pixelBuffer: PixelBufferProtocol?
     /// 用displayLink会导致锁屏无法draw，
     /// 用DispatchSourceTimer的话，在播放4k视频的时候repeat的时间会变长,
     /// 用MTKView的draw(in:)也是不行，会卡顿
     private var displayLink: CADisplayLink!
 //    private let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-    var options: KSOptions
-    weak var renderSource: OutputRenderSourceDelegate?
+    public var options: KSOptions
+    public weak var renderSource: OutputRenderSourceDelegate?
     // AVSampleBufferAudioRenderer AVSampleBufferRenderSynchronizer AVSampleBufferDisplayLayer
-    var displayView = AVSampleBufferDisplayView()
+    var displayView = AVSampleBufferDisplayView() {
+        didSet {
+            displayLayerDelegate?.change(displayLayer: displayView.displayLayer)
+        }
+    }
+
     private let metalView = MetalView()
-    init(options: KSOptions) {
+    public weak var displayLayerDelegate: DisplayLayerDelegate?
+    public init(options: KSOptions) {
         self.options = options
         super.init(frame: .zero)
         addSubview(displayView)
@@ -37,18 +84,11 @@ public final class MetalPlayView: UIView {
         pause()
     }
 
-    func prepare(fps: Float, startPlayTime: TimeInterval = 0) {
-        displayLink.preferredFramesPerSecond = Int(ceil(fps)) << 1
-        if let controlTimebase = displayView.displayLayer.controlTimebase, startPlayTime > 1 {
-            CMTimebaseSetTime(controlTimebase, time: CMTimeMake(value: Int64(startPlayTime), timescale: 1))
-        }
-    }
-
-    func play() {
+    public func play() {
         displayLink.isPaused = false
     }
 
-    func pause() {
+    public func pause() {
         displayLink.isPaused = true
     }
 
@@ -102,7 +142,8 @@ public final class MetalPlayView: UIView {
     }
     #endif
 
-    func clear() {
+    public func flush() {
+        pixelBuffer = nil
         if displayView.isHidden {
             metalView.clear()
         } else {
@@ -110,13 +151,17 @@ public final class MetalPlayView: UIView {
         }
     }
 
-    func invalidate() {
+    public func invalidate() {
         displayLink.invalidate()
     }
 
     public func readNextFrame() {
         draw(force: true)
     }
+
+//    deinit {
+//        print()
+//    }
 }
 
 extension MetalPlayView {
@@ -133,10 +178,12 @@ extension MetalPlayView {
             guard let pixelBuffer else {
                 return
             }
+            isDovi = frame.isDovi
+            fps = frame.fps
             let cmtime = frame.cmtime
             let par = pixelBuffer.size
             let sar = pixelBuffer.aspectRatio
-            if options.isUseDisplayLayer() {
+            if let pixelBuffer = pixelBuffer.cvPixelBuffer, options.isUseDisplayLayer() {
                 if displayView.isHidden {
                     displayView.isHidden = false
                     metalView.isHidden = true
@@ -145,6 +192,7 @@ extension MetalPlayView {
                 if let dar = options.customizeDar(sar: sar, par: par) {
                     pixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * par.width / par.height)
                 }
+                checkFormatDescription(pixelBuffer: pixelBuffer)
                 set(pixelBuffer: pixelBuffer, time: cmtime)
             } else {
                 if !displayView.isHidden {
@@ -162,26 +210,27 @@ extension MetalPlayView {
                 } else {
                     size = KSOptions.sceneSize
                 }
+                checkFormatDescription(pixelBuffer: pixelBuffer)
                 metalView.draw(pixelBuffer: pixelBuffer, display: options.display, size: size)
             }
-            renderSource?.setVideo(time: cmtime, duration: frame.timebase.cmtime(for: frame.duration))
+            renderSource?.setVideo(time: cmtime, position: frame.position)
         }
     }
 
-    private func set(pixelBuffer: CVPixelBuffer, time: CMTime) {
-        if videoInfo == nil || !CMVideoFormatDescriptionMatchesImageBuffer(videoInfo!, imageBuffer: pixelBuffer) {
-            if videoInfo != nil {
+    private func checkFormatDescription(pixelBuffer: PixelBufferProtocol) {
+        if formatDescription == nil || !pixelBuffer.matche(formatDescription: formatDescription!) {
+            if formatDescription != nil {
                 displayView.removeFromSuperview()
                 displayView = AVSampleBufferDisplayView()
                 addSubview(displayView)
             }
-            let err = CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixelBuffer, formatDescriptionOut: &videoInfo)
-            if err != noErr {
-                KSLog("Error at CMVideoFormatDescriptionCreateForImageBuffer \(err)")
-            }
+            formatDescription = pixelBuffer.formatDescription
         }
-        guard let videoInfo else { return }
-        displayView.enqueue(imageBuffer: pixelBuffer, formatDescription: videoInfo, time: time)
+    }
+
+    private func set(pixelBuffer: CVPixelBuffer, time: CMTime) {
+        guard let formatDescription else { return }
+        displayView.enqueue(imageBuffer: pixelBuffer, formatDescription: formatDescription, time: time)
     }
 }
 
@@ -217,13 +266,13 @@ class MetalView: UIView {
         }
     }
 
-    func draw(pixelBuffer: CVPixelBuffer, display: DisplayEnum, size: CGSize) {
+    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum, size: CGSize) {
         metalLayer.drawableSize = size
         metalLayer.pixelFormat = KSOptions.colorPixelFormat(bitDepth: pixelBuffer.bitDepth)
         let colorspace = pixelBuffer.colorspace
-        if metalLayer.colorspace != colorspace {
+        if colorspace != nil, metalLayer.colorspace != colorspace {
             metalLayer.colorspace = colorspace
-            KSLog("CAMetalLayer colorspace \(String(describing: colorspace))")
+            KSLog("[video] CAMetalLayer colorspace \(String(describing: colorspace))")
             #if !os(tvOS)
             if #available(iOS 16.0, *) {
                 if let name = colorspace?.name, name != CGColorSpace.sRGB {
@@ -235,12 +284,12 @@ class MetalView: UIView {
                 } else {
                     metalLayer.wantsExtendedDynamicRangeContent = false
                 }
-                KSLog("CAMetalLayer wantsExtendedDynamicRangeContent \(metalLayer.wantsExtendedDynamicRangeContent)")
+                KSLog("[video] CAMetalLayer wantsExtendedDynamicRangeContent \(metalLayer.wantsExtendedDynamicRangeContent)")
             }
             #endif
         }
         guard let drawable = metalLayer.nextDrawable() else {
-            KSLog("CAMetalLayer not readyForMoreMediaData")
+            KSLog("[video] CAMetalLayer not readyForMoreMediaData")
             return
         }
         render.draw(pixelBuffer: pixelBuffer, display: display, drawable: drawable)
@@ -277,10 +326,10 @@ class AVSampleBufferDisplayView: UIView {
     }
 
     func enqueue(imageBuffer: CVPixelBuffer, formatDescription: CMVideoFormatDescription, time: CMTime) {
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        let timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
         //        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: time, decodeTimeStamp: .invalid)
         var sampleBuffer: CMSampleBuffer?
-        CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: imageBuffer, formatDescription: formatDescription, sampleTiming: &timing, sampleBufferOut: &sampleBuffer)
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: imageBuffer, formatDescription: formatDescription, sampleTiming: [timing], sampleBufferOut: &sampleBuffer)
         if let sampleBuffer {
             if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) as? [NSMutableDictionary], let dic = attachmentsArray.first {
                 dic[kCMSampleAttachmentKey_DisplayImmediately] = true
@@ -288,19 +337,17 @@ class AVSampleBufferDisplayView: UIView {
             if displayLayer.isReadyForMoreMediaData {
                 displayLayer.enqueue(sampleBuffer)
             } else {
-                KSLog("AVSampleBufferDisplayLayer not readyForMoreMediaData. video time \(time), controlTime \(displayLayer.timebase.time) ")
-                if let controlTimebase = displayLayer.controlTimebase {
-                    CMTimebaseSetTime(controlTimebase, time: time)
-                }
+                KSLog("[video] AVSampleBufferDisplayLayer not readyForMoreMediaData. video time \(time), controlTime \(displayLayer.timebase.time) ")
+                displayLayer.enqueue(sampleBuffer)
             }
             if #available(macOS 11.0, iOS 14, tvOS 14, *) {
                 if displayLayer.requiresFlushToResumeDecoding {
-                    KSLog("AVSampleBufferDisplayLayer requiresFlushToResumeDecoding so flush")
+                    KSLog("[video] AVSampleBufferDisplayLayer requiresFlushToResumeDecoding so flush")
                     displayLayer.flush()
                 }
             }
             if displayLayer.status == .failed {
-                KSLog("AVSampleBufferDisplayLayer status failed so flush")
+                KSLog("[video] AVSampleBufferDisplayLayer status failed so flush")
                 displayLayer.flush()
                 //                    if let error = displayLayer.error as NSError?, error.code == -11847 {
                 //                        displayLayer.stopRequestingMediaData()
@@ -312,11 +359,20 @@ class AVSampleBufferDisplayView: UIView {
 
 #if os(macOS)
 import CoreVideo
+
 class CADisplayLink {
     private let displayLink: CVDisplayLink
     private var runloop: RunLoop?
     private var mode = RunLoop.Mode.default
     public var preferredFramesPerSecond = 60
+    @available(macOS 12.0, *)
+    public var preferredFrameRateRange: CAFrameRateRange {
+        get {
+            CAFrameRateRange()
+        }
+        set {}
+    }
+
     public var timestamp: TimeInterval {
         var timeStamp = CVTimeStamp()
         if CVDisplayLinkGetCurrentTime(displayLink, &timeStamp) == kCVReturnSuccess, (timeStamp.flags & CVTimeStampFlags.hostTimeValid.rawValue) != 0 {
@@ -377,6 +433,9 @@ class CADisplayLink {
     public func invalidate() {
         isPaused = true
         runloop = nil
+        CVDisplayLinkSetOutputHandler(displayLink) { _, _, _, _, _ in
+            kCVReturnError
+        }
     }
 }
 #endif

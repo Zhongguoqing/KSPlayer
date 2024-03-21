@@ -12,11 +12,13 @@ import SwiftUI
 import UIKit
 #else
 import AppKit
+
 public typealias UIViewRepresentable = NSViewRepresentable
 #endif
 
 public struct KSVideoPlayer {
-    public let coordinator: Coordinator
+    @ObservedObject
+    public private(set) var coordinator: Coordinator
     public let url: URL
     public let options: KSOptions
     public init(coordinator: Coordinator, url: URL, options: KSOptions) {
@@ -32,7 +34,7 @@ extension KSVideoPlayer: UIViewRepresentable {
     }
 
     #if canImport(UIKit)
-    public typealias UIViewType = KSPlayerLayer
+    public typealias UIViewType = UIView
     public func makeUIView(context: Context) -> UIViewType {
         let view = context.coordinator.makeView(url: url, options: options)
         let swipeDown = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipeGestureAction(_:)))
@@ -55,9 +57,11 @@ extension KSVideoPlayer: UIViewRepresentable {
     }
 
     // iOS tvOS真机先调用onDisappear在调用dismantleUIView，但是模拟器就反过来了。
-    public static func dismantleUIView(_: UIViewType, coordinator _: Coordinator) {}
+    public static func dismantleUIView(_: UIViewType, coordinator: Coordinator) {
+        coordinator.resetPlayer()
+    }
     #else
-    public typealias NSViewType = KSPlayerLayer
+    public typealias NSViewType = UIView
     public func makeNSView(context: Context) -> NSViewType {
         context.coordinator.makeView(url: url, options: options)
     }
@@ -67,17 +71,19 @@ extension KSVideoPlayer: UIViewRepresentable {
     }
 
     // macOS先调用onDisappear在调用dismantleNSView
-    public static func dismantleNSView(_ view: NSViewType, coordinator _: Coordinator) {
+    public static func dismantleNSView(_ view: NSViewType, coordinator: Coordinator) {
+        coordinator.resetPlayer()
         view.window?.aspectRatio = CGSize(width: 16, height: 9)
     }
     #endif
 
-    private func updateView(_ view: KSPlayerLayer, context: Context) {
-        if view.url != url {
+    private func updateView(_: UIView, context: Context) {
+        if context.coordinator.playerLayer?.url != url {
             _ = context.coordinator.makeView(url: url, options: options)
         }
     }
 
+    @MainActor
     public final class Coordinator: ObservableObject {
         @Published
         public var state = KSPlayerState.prepareToPlay
@@ -85,6 +91,13 @@ extension KSVideoPlayer: UIViewRepresentable {
         public var isMuted: Bool = false {
             didSet {
                 playerLayer?.player.isMuted = isMuted
+            }
+        }
+
+        @Published
+        public var playbackVolume: Float = 1.0 {
+            didSet {
+                playerLayer?.player.playbackVolume = playbackVolume
             }
         }
 
@@ -102,43 +115,52 @@ extension KSVideoPlayer: UIViewRepresentable {
             }
         }
 
+        @Published
+        @MainActor
+        public var isMaskShow = true {
+            didSet {
+                if isMaskShow != oldValue {
+                    if isMaskShow {
+                        delayItem?.cancel()
+                        // 播放的时候才自动隐藏
+                        guard state == .bufferFinished else { return }
+                        delayItem = DispatchWorkItem { [weak self] in
+                            self?.isMaskShow = false
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + KSOptions.animateDelayTimeInterval,
+                                                      execute: delayItem!)
+                    }
+                    #if os(macOS)
+                    isMaskShow ? NSCursor.unhide() : NSCursor.setHiddenUntilMouseMoves(true)
+                    if let window = playerLayer?.player.view?.window {
+                        if !window.styleMask.contains(.fullScreen) {
+                            window.standardWindowButton(.closeButton)?.superview?.superview?.isHidden = !isMaskShow
+                            //                    window.standardWindowButton(.zoomButton)?.isHidden = !isMaskShow
+                            //                    window.standardWindowButton(.closeButton)?.isHidden = !isMaskShow
+                            //                    window.standardWindowButton(.miniaturizeButton)?.isHidden = !isMaskShow
+                            //                    window.titleVisibility = isMaskShow ? .visible : .hidden
+                        }
+                    }
+                    #endif
+                }
+            }
+        }
+
         public var subtitleModel = SubtitleModel()
         public var timemodel = ControllerTimeModel()
-        public var selectedAudioTrack: MediaPlayerTrack? {
-            didSet {
-                if oldValue?.trackID != selectedAudioTrack?.trackID {
-                    if let track = selectedAudioTrack {
-                        playerLayer?.player.select(track: track)
-                        playerLayer?.player.isMuted = false
-                    } else {
-                        playerLayer?.player.isMuted = true
-                    }
-                }
-            }
-        }
-
-        public var selectedVideoTrack: MediaPlayerTrack? {
-            didSet {
-                if oldValue?.trackID != selectedVideoTrack?.trackID {
-                    if let track = selectedVideoTrack {
-                        playerLayer?.player.select(track: track)
-                        playerLayer?.options.videoDisable = false
-                    } else {
-                        oldValue?.isEnabled = false
-                        playerLayer?.options.videoDisable = true
-                    }
-                }
-            }
-        }
-
         // 在SplitView模式下，第二次进入会先调用makeUIView。然后在调用之前的dismantleUIView.所以如果进入的是同一个View的话，就会导致playerLayer被清空了。最准确的方式是在onDisappear清空playerLayer
-        public var playerLayer: KSPlayerLayer?
-        public var audioTracks = [MediaPlayerTrack]()
-        public var videoTracks = [MediaPlayerTrack]()
-        fileprivate var onPlay: ((TimeInterval, TimeInterval) -> Void)?
-        fileprivate var onFinish: ((KSPlayerLayer, Error?) -> Void)?
-        fileprivate var onStateChanged: ((KSPlayerLayer, KSPlayerState) -> Void)?
-        fileprivate var onBufferChanged: ((Int, TimeInterval) -> Void)?
+        public var playerLayer: KSPlayerLayer? {
+            didSet {
+                oldValue?.delegate = nil
+                oldValue?.pause()
+            }
+        }
+
+        private var delayItem: DispatchWorkItem?
+        public var onPlay: ((TimeInterval, TimeInterval) -> Void)?
+        public var onFinish: ((KSPlayerLayer, Error?) -> Void)?
+        public var onStateChanged: ((KSPlayerLayer, KSPlayerState) -> Void)?
+        public var onBufferChanged: ((Int, TimeInterval) -> Void)?
         #if canImport(UIKit)
         fileprivate var onSwipe: ((UISwipeGestureRecognizer.Direction) -> Void)?
         @objc fileprivate func swipeGestureAction(_ recognizer: UISwipeGestureRecognizer) {
@@ -148,26 +170,42 @@ extension KSVideoPlayer: UIViewRepresentable {
 
         public init() {}
 
-        public func makeView(url: URL, options: KSOptions) -> KSPlayerLayer {
+        public func makeView(url: URL, options: KSOptions) -> UIView {
+            defer {
+                DispatchQueue.main.async { [weak self] in
+                    self?.subtitleModel.url = url
+                }
+            }
             if let playerLayer {
+                if playerLayer.url == url {
+                    return playerLayer.player.view ?? UIView()
+                }
                 playerLayer.delegate = nil
                 playerLayer.set(url: url, options: options)
-                subtitleModel.url = url
                 playerLayer.delegate = self
-                return playerLayer
+                return playerLayer.player.view ?? UIView()
             } else {
                 let playerLayer = KSPlayerLayer(url: url, options: options)
-                subtitleModel.url = url
                 playerLayer.delegate = self
                 self.playerLayer = playerLayer
-                return playerLayer
+                return playerLayer.player.view ?? UIView()
             }
         }
 
         public func resetPlayer() {
-            playerLayer?.delegate = nil
-            playerLayer?.pause()
+            onStateChanged = nil
+            onPlay = nil
+            onFinish = nil
+            onBufferChanged = nil
+            #if canImport(UIKit)
+            onSwipe = nil
+            #endif
             playerLayer = nil
+            delayItem?.cancel()
+            delayItem = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.subtitleModel.url = nil
+            }
         }
 
         public func skip(interval: Int) {
@@ -184,30 +222,32 @@ extension KSVideoPlayer: UIViewRepresentable {
 
 extension KSVideoPlayer.Coordinator: KSPlayerLayerDelegate {
     public func player(layer: KSPlayerLayer, state: KSPlayerState) {
+        self.state = state
+        onStateChanged?(layer, state)
         if state == .readyToPlay {
             playbackRate = layer.player.playbackRate
-            videoTracks = layer.player.tracks(mediaType: .video)
-            audioTracks = layer.player.tracks(mediaType: .audio)
-            subtitleModel.selectedSubtitleInfo = subtitleModel.subtitleInfos.first
-            selectedAudioTrack = audioTracks.first { $0.isEnabled }
-            selectedVideoTrack = videoTracks.first { $0.isEnabled }
             if let subtitleDataSouce = layer.player.subtitleDataSouce {
                 // 要延后增加内嵌字幕。因为有些内嵌字幕是放在视频流的。所以会比readyToPlay回调晚。
                 DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 1) { [weak self] in
                     guard let self else { return }
                     self.subtitleModel.addSubtitle(dataSouce: subtitleDataSouce)
                     if self.subtitleModel.selectedSubtitleInfo == nil, layer.options.autoSelectEmbedSubtitle {
-                        self.subtitleModel.selectedSubtitleInfo = self.subtitleModel.subtitleInfos.first
+                        self.subtitleModel.selectedSubtitleInfo = subtitleDataSouce.infos.first { $0.isEnabled }
                     }
                 }
             }
+        } else if state == .bufferFinished {
+            isMaskShow = false
+        } else {
+            isMaskShow = true
         }
-        self.state = state
-        onStateChanged?(layer, state)
     }
 
     public func player(layer _: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
         onPlay?(currentTime, totalTime)
+        if currentTime >= Double(Int.max) || currentTime <= Double(Int.min) || totalTime >= Double(Int.max) || totalTime <= Double(Int.min) {
+            return
+        }
         let current = Int(currentTime)
         let total = Int(max(0, totalTime))
         if timemodel.currentTime != current {
@@ -265,9 +305,19 @@ public extension KSVideoPlayer {
     #endif
 }
 
+extension View {
+    func then(_ body: (inout Self) -> Void) -> Self {
+        var result = self
+        body(&result)
+        return result
+    }
+}
+
 /// 这是一个频繁变化的model。View要少用这个
 public class ControllerTimeModel: ObservableObject {
     // 改成int才不会频繁更新
-    @Published public var currentTime = 0
-    @Published public var totalTime = 1
+    @Published
+    public var currentTime = 0
+    @Published
+    public var totalTime = 1
 }

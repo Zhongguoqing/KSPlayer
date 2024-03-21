@@ -4,10 +4,12 @@ import AVKit
 import UIKit
 #else
 import AppKit
+
 public typealias UIImage = NSImage
 #endif
 import Combine
 import CoreGraphics
+
 public final class KSAVPlayerView: UIView {
     public let player = AVQueuePlayer()
     override public init(frame: CGRect) {
@@ -63,6 +65,7 @@ public final class KSAVPlayerView: UIView {
     }
 }
 
+@MainActor
 public class KSAVPlayer {
     private var cancellable: AnyCancellable?
     private var options: KSOptions {
@@ -98,11 +101,6 @@ public class KSAVPlayer {
     private lazy var _pipController: Any? = {
         if #available(tvOS 14.0, *) {
             let pip = KSPictureInPictureController(playerLayer: playerView.playerLayer)
-            #if os(iOS)
-            if #available(iOS 14.2, *) {
-                pip?.canStartPictureInPictureAutomaticallyFromInline = options.canStartPictureInPictureAutomaticallyFromInline
-            }
-            #endif
             return pip
         } else {
             return nil
@@ -115,6 +113,7 @@ public class KSAVPlayer {
     }
 
     public var naturalSize: CGSize = .zero
+    public let dynamicInfo: DynamicInfo? = nil
     @available(macOS 12.0, iOS 15.0, tvOS 15.0, *)
     public var playbackCoordinator: AVPlaybackCoordinator {
         playerView.player.playbackCoordinator
@@ -128,8 +127,9 @@ public class KSAVPlayer {
 
     public weak var delegate: MediaPlayerDelegate?
     public private(set) var duration: TimeInterval = 0
+    public private(set) var fileSize: Double = 0
     public private(set) var playableTime: TimeInterval = 0
-
+    public let chapters: [Chapter] = []
     public var playbackRate: Float = 1 {
         didSet {
             if playbackState == .playing {
@@ -263,6 +263,8 @@ extension KSAVPlayer {
             // 默认选择第一个声道
             item.tracks.filter { $0.assetTrack?.mediaType.rawValue == AVMediaType.audio.rawValue }.dropFirst().forEach { $0.isEnabled = false }
             duration = item.duration.seconds
+            let estimatedDataRates = item.tracks.compactMap { $0.assetTrack?.estimatedDataRate }
+            fileSize = Double(estimatedDataRates.reduce(0, +)) * duration / 8
             isReadyToPlay = true
         } else if item.status == .failed {
             error = item.error
@@ -398,7 +400,7 @@ extension KSAVPlayer: MediaPlayerProtocol {
         let time = max(time, 0)
         shouldSeekTo = time
         playbackState = .seeking
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             self?.bufferingProgress = 0
         }
         let tolerance: CMTime = options.isAccurateSeek ? .zero : .positiveInfinity
@@ -413,7 +415,7 @@ extension KSAVPlayer: MediaPlayerProtocol {
     public func prepareToPlay() {
         KSLog("prepareToPlay \(self)")
         options.prepareTime = CACurrentMediaTime()
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             guard let self else { return }
             self.bufferingProgress = 0
             let playerItem = AVPlayerItem(asset: self.urlAsset)
@@ -510,27 +512,22 @@ extension AVAssetTrack {
 }
 
 class AVMediaPlayerTrack: MediaPlayerTrack {
+    let formatDescription: CMFormatDescription?
     let description: String
     private let track: AVPlayerItemTrack
-    let nominalFrameRate: Float
+    var nominalFrameRate: Float
     let trackID: Int32
-    let mediaSubType: CMFormatDescription.MediaSubType
     let rotation: Int16 = 0
+    let bitDepth: Int32
     let bitRate: Int64
-    let naturalSize: CGSize
     let name: String
-    let language: String?
+    let languageCode: String?
     let mediaType: AVFoundation.AVMediaType
-    let depth: Int32
-    let fullRangeVideo: Bool
-    let colorPrimaries: String?
-    let transferFunction: String?
-    let yCbCrMatrix: String?
     let isImageSubtitle = false
     var dovi: DOVIDecoderConfigurationRecord?
-    var audioStreamBasicDescription: AudioStreamBasicDescription?
     let fieldOrder: FFmpegFieldOrder = .unknown
     var isPlayable: Bool
+    @MainActor
     var isEnabled: Bool {
         get {
             track.isEnabled
@@ -544,46 +541,24 @@ class AVMediaPlayerTrack: MediaPlayerTrack {
         self.track = track
         trackID = track.assetTrack?.trackID ?? 0
         mediaType = track.assetTrack?.mediaType ?? .video
-        let formatDescription: Any?
+        name = track.assetTrack?.languageCode ?? ""
+        languageCode = track.assetTrack?.languageCode
+        nominalFrameRate = track.assetTrack?.nominalFrameRate ?? 24.0
+        bitRate = Int64(track.assetTrack?.estimatedDataRate ?? 0)
         #if os(xrOS)
-        name = track.assetTrack?.languageCode ?? ""
-        language = track.assetTrack?.extendedLanguageTag
-        nominalFrameRate = track.assetTrack?.nominalFrameRate ?? 24.0
-        naturalSize = track.assetTrack?.naturalSize ?? .zero
-        bitRate = Int64(track.assetTrack?.estimatedDataRate ?? 0)
         isPlayable = false
-        formatDescription = track.assetTrack?.formatDescriptions.first
         #else
-        name = track.assetTrack?.languageCode ?? ""
-        language = track.assetTrack?.extendedLanguageTag
-        nominalFrameRate = track.assetTrack?.nominalFrameRate ?? 24.0
-        naturalSize = track.assetTrack?.naturalSize ?? .zero
-        bitRate = Int64(track.assetTrack?.estimatedDataRate ?? 0)
         isPlayable = track.assetTrack?.isPlayable ?? false
-        formatDescription = track.assetTrack?.formatDescriptions.first
         #endif
-        if let formatDescription {
-            // swiftlint:disable force_cast
-            let desc = formatDescription as! CMFormatDescription
-            // swiftlint:enable force_cast
-            mediaSubType = desc.mediaSubType
-            audioStreamBasicDescription = desc.audioStreamBasicDescription
-            let dictionary = CMFormatDescriptionGetExtensions(desc) as NSDictionary?
-            colorPrimaries = dictionary?[kCVImageBufferColorPrimariesKey] as? String
-            transferFunction = dictionary?[kCVImageBufferTransferFunctionKey] as? String
-            yCbCrMatrix = dictionary?[kCVImageBufferYCbCrMatrixKey] as? String
-            fullRangeVideo = (dictionary?[kCMFormatDescriptionExtension_FullRangeVideo] as? Int32 ?? 0) == 1
-            depth = dictionary?[kCMFormatDescriptionExtension_Depth] as? Int32 ?? 24
-            description = mediaSubType.rawValue.string
+        // swiftlint:disable force_cast
+        if let first = track.assetTrack?.formatDescriptions.first {
+            formatDescription = first as! CMFormatDescription
         } else {
-            depth = 24
-            colorPrimaries = nil
-            transferFunction = nil
-            yCbCrMatrix = nil
-            mediaSubType = .boxed
-            fullRangeVideo = false
-            description = ""
+            formatDescription = nil
         }
+        bitDepth = formatDescription?.bitDepth ?? 0
+        // swiftlint:enable force_cast
+        description = (formatDescription?.mediaSubType ?? .boxed).rawValue.string
         #if os(xrOS)
         Task {
             isPlayable = await (try? track.assetTrack?.load(.isPlayable)) ?? false

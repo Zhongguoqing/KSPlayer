@@ -105,20 +105,19 @@ open class VideoPlayerView: PlayerView {
 
     override public var playerLayer: KSPlayerLayer? {
         didSet {
-            oldValue?.removeFromSuperview()
-            if let playerLayer {
+            oldValue?.player.view?.removeFromSuperview()
+            if let view = playerLayer?.player.view {
                 #if canImport(UIKit)
-                addSubview(playerLayer)
-                sendSubviewToBack(playerLayer)
+                insertSubview(view, belowSubview: contentOverlayView)
                 #else
-                addSubview(playerLayer, positioned: .below, relativeTo: contentOverlayView)
+                addSubview(view, positioned: .below, relativeTo: contentOverlayView)
                 #endif
-                playerLayer.translatesAutoresizingMaskIntoConstraints = false
+                view.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
-                    playerLayer.topAnchor.constraint(equalTo: topAnchor),
-                    playerLayer.leadingAnchor.constraint(equalTo: leadingAnchor),
-                    playerLayer.bottomAnchor.constraint(equalTo: bottomAnchor),
-                    playerLayer.trailingAnchor.constraint(equalTo: trailingAnchor),
+                    view.topAnchor.constraint(equalTo: topAnchor),
+                    view.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    view.bottomAnchor.constraint(equalTo: bottomAnchor),
+                    view.trailingAnchor.constraint(equalTo: trailingAnchor),
                 ])
             }
         }
@@ -163,7 +162,6 @@ open class VideoPlayerView: PlayerView {
     // MARK: - setup UI
 
     open func setupUIComponents() {
-        backgroundColor = .black
         addSubview(contentOverlayView)
         addSubview(controllerView)
         #if os(macOS)
@@ -172,6 +170,7 @@ open class VideoPlayerView: PlayerView {
         topMaskView.gradientLayer.colors = [UIColor.black.withAlphaComponent(0.5).cgColor, UIColor.clear.cgColor]
         #endif
         bottomMaskView.gradientLayer.colors = topMaskView.gradientLayer.colors
+        topMaskView.isHidden = KSOptions.topBarShowInCase != .always
         topMaskView.gradientLayer.startPoint = .zero
         topMaskView.gradientLayer.endPoint = CGPoint(x: 0, y: 1)
         bottomMaskView.gradientLayer.startPoint = CGPoint(x: 0, y: 1)
@@ -237,9 +236,11 @@ open class VideoPlayerView: PlayerView {
         guard !isSliderSliding else { return }
         super.player(layer: layer, currentTime: currentTime, totalTime: totalTime)
         if srtControl.subtitle(currentTime: currentTime) {
-            if let part = srtControl.part {
+            if let part = srtControl.parts.first {
                 subtitleBackView.image = part.image
-                subtitleLabel.attributedText = part.text
+                if let text = part.text {
+                    subtitleLabel.attributedText = text
+                }
                 subtitleBackView.isHidden = false
             } else {
                 subtitleBackView.image = nil
@@ -265,9 +266,9 @@ open class VideoPlayerView: PlayerView {
                     guard let self else { return }
                     self.srtControl.addSubtitle(dataSouce: subtitleDataSouce)
                     if self.srtControl.selectedSubtitleInfo == nil, layer.options.autoSelectEmbedSubtitle {
-                        self.srtControl.selectedSubtitleInfo = self.srtControl.subtitleInfos.first
+                        self.srtControl.selectedSubtitleInfo = self.srtControl.subtitleInfos.first { $0.isEnabled }
                     }
-                    self.toolBar.srtButton.isHidden = self.srtControl.subtitleInfos.count == 0
+                    self.toolBar.srtButton.isHidden = self.srtControl.subtitleInfos.isEmpty
                     if #available(iOS 14.0, tvOS 15.0, *) {
                         self.buildMenusForButtons()
                     }
@@ -342,12 +343,12 @@ open class VideoPlayerView: PlayerView {
     }
 
     open func set(resource: KSPlayerResource, definitionIndex: Int = 0, isSetUrl: Bool = true) {
-        self.resource = resource
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         if isSetUrl {
             let asset = resource.definitions[currentDefinition]
             super.set(url: asset.url, options: asset.options)
         }
+        self.resource = resource
     }
 
     override open func set(url: URL, options: KSOptions) {
@@ -432,7 +433,7 @@ extension VideoPlayerView {
         }
         let audioTracks = playerLayer?.player.tracks(mediaType: .audio) ?? []
         toolBar.audioSwitchButton.setMenu(title: NSLocalizedString("switch audio", comment: ""), current: audioTracks.first(where: { $0.isEnabled }), list: audioTracks) { value in
-            value.name
+            value.description
         } completition: { [weak self] value in
             guard let self else { return }
             if let value {
@@ -512,7 +513,7 @@ public extension VideoPlayerView {
 
     private func changeSrt(button _: UIButton) {
         let availableSubtitles = srtControl.subtitleInfos
-        guard availableSubtitles.count > 0 else { return }
+        guard !availableSubtitles.isEmpty else { return }
 
         let alertController = UIAlertController(title: NSLocalizedString("subtitle", comment: ""),
                                                 message: nil,
@@ -529,7 +530,7 @@ public extension VideoPlayerView {
             disableAction.setValue(true, forKey: "checked")
         }
 
-        availableSubtitles.enumerated().forEach { _, srt in
+        for (_, srt) in availableSubtitles.enumerated() {
             let action = UIAlertAction(title: srt.name, style: .default) { [weak self] _ in
                 self?.srtControl.selectedSubtitleInfo = srt
             }
@@ -546,7 +547,7 @@ public extension VideoPlayerView {
 
     private func changePlaybackRate(button: UIButton) {
         let alertController = UIAlertController(title: NSLocalizedString("select speed", comment: ""), message: nil, preferredStyle: preferredStyle())
-        [0.75, 1.0, 1.25, 1.5, 2.0].forEach { rate in
+        for rate in [0.75, 1.0, 1.25, 1.5, 2.0] {
             let title = "\(rate) x"
             let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
                 guard let self else { return }
@@ -555,7 +556,7 @@ public extension VideoPlayerView {
             }
             alertController.addAction(action)
 
-            if Float(rate) == self.playerLayer?.player.playbackRate {
+            if Float(rate) == playerLayer?.player.playbackRate {
                 alertController.preferredAction = action
                 action.setValue(true, forKey: "checked")
             }

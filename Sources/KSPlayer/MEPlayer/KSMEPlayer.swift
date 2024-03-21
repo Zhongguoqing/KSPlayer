@@ -1,5 +1,5 @@
 //
-//  File.swift
+//  KSMEPlayer.swift
 //  KSPlayer
 //
 //  Created by kintan on 2018/3/9.
@@ -16,23 +16,31 @@ import AppKit
 public class KSMEPlayer: NSObject {
     private var loopCount = 1
     private var playerItem: MEPlayerItem
-    private let audioOutput: AudioPlayer & FrameOutput = KSOptions.isUseAudioRenderer ? AudioRendererPlayer() : AudioEnginePlayer()
+    public let audioOutput: AudioOutput
     private var options: KSOptions
     private var bufferingCountDownTimer: Timer?
-    public private(set) var videoOutput: MetalPlayView?
-    public private(set) var bufferingProgress = 0 {
+    public private(set) var videoOutput: (VideoOutput & UIView)? {
         didSet {
-            delegate?.changeBuffering(player: self, progress: bufferingProgress)
+            oldValue?.invalidate()
+            runOnMainThread {
+                oldValue?.removeFromSuperview()
+            }
+        }
+    }
+
+    public private(set) var bufferingProgress = 0 {
+        willSet {
+            runOnMainThread { [weak self] in
+                guard let self else { return }
+                delegate?.changeBuffering(player: self, progress: newValue)
+            }
         }
     }
 
     private lazy var _pipController: Any? = {
         if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *), let videoOutput {
-            let contentSource = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: videoOutput.displayView.displayLayer, playbackDelegate: self)
+            let contentSource = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: videoOutput.displayLayer, playbackDelegate: self)
             let pip = KSPictureInPictureController(contentSource: contentSource)
-            #if os(iOS)
-            pip.canStartPictureInPictureAutomaticallyFromInline = options.canStartPictureInPictureAutomaticallyFromInline
-            #endif
             return pip
         } else {
             return nil
@@ -69,7 +77,18 @@ public class KSMEPlayer: NSObject {
 
     public var playbackRate: Float = 1 {
         didSet {
-            audioOutput.playbackRate = playbackRate
+            if playbackRate != audioOutput.playbackRate {
+                audioOutput.playbackRate = playbackRate
+                if audioOutput is AudioUnitPlayer {
+                    var audioFilters = options.audioFilters.filter {
+                        !$0.hasPrefix("atempo=")
+                    }
+                    if playbackRate != 1 {
+                        audioFilters.append("atempo=\(playbackRate)")
+                    }
+                    options.audioFilters = audioFilters
+                }
+            }
         }
     }
 
@@ -86,25 +105,32 @@ public class KSMEPlayer: NSObject {
             if playbackState != oldValue {
                 playOrPause()
                 if playbackState == .finished {
-                    delegate?.finish(player: self, error: nil)
+                    runOnMainThread { [weak self] in
+                        guard let self else { return }
+                        delegate?.finish(player: self, error: nil)
+                    }
                 }
             }
         }
     }
 
     public required init(url: URL, options: KSOptions) {
+        KSOptions.setAudioSession()
+        audioOutput = KSOptions.audioPlayerType.init()
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
             videoOutput = nil
         } else {
-            videoOutput = MetalPlayView(options: options)
+            videoOutput = KSOptions.videoPlayerType.init(options: options)
         }
         self.options = options
         super.init()
         playerItem.delegate = self
         audioOutput.renderSource = playerItem
         videoOutput?.renderSource = playerItem
+        videoOutput?.displayLayerDelegate = self
         #if !os(macOS)
+        NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChange), name: AVAudioSession.routeChangeNotification, object: AVAudioSession.sharedInstance())
         if #available(tvOS 15.0, iOS 15.0, *) {
             NotificationCenter.default.addObserver(self, selector: #selector(spatialCapabilityChange), name: AVAudioSession.spatialPlaybackCapabilitiesChangedNotification, object: nil)
         }
@@ -112,6 +138,10 @@ public class KSMEPlayer: NSObject {
     }
 
     deinit {
+        #if !os(macOS)
+        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(2)
+        #endif
+        NotificationCenter.default.removeObserver(self)
         videoOutput?.invalidate()
         playerItem.shutdown()
     }
@@ -121,14 +151,14 @@ public class KSMEPlayer: NSObject {
 
 private extension KSMEPlayer {
     func playOrPause() {
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             guard let self else { return }
             let isPaused = !(self.playbackState == .playing && self.loadState == .playable)
             if isPaused {
                 self.audioOutput.pause()
                 self.videoOutput?.pause()
             } else {
-                self.audioOutput.play(time: self.playerItem.currentPlaybackTime)
+                self.audioOutput.play()
                 self.videoOutput?.play()
             }
             self.delegate?.changeLoadState(player: self)
@@ -136,49 +166,68 @@ private extension KSMEPlayer {
     }
 
     @objc private func spatialCapabilityChange(notification _: Notification) {
-        let audioDescriptor = tracks(mediaType: .audio).first { $0.isEnabled }.flatMap {
-            $0 as? FFmpegAssetTrack
-        }?.audioDescriptor ?? .defaultValue
-        options.setAudioSession(audioDescriptor: audioDescriptor)
+        KSLog("[audio] spatialCapabilityChange")
+        for track in tracks(mediaType: .audio) {
+            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat()
+        }
     }
+
+    #if !os(macOS)
+    @objc private func audioRouteChange(notification: Notification) {
+        KSLog("[audio] audioRouteChange")
+        guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else {
+            return
+        }
+        let routeChangeReason = AVAudioSession.RouteChangeReason(rawValue: reason)
+        guard routeChangeReason == .newDeviceAvailable || routeChangeReason == .oldDeviceUnavailable else {
+            return
+        }
+        for track in tracks(mediaType: .audio) {
+            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat()
+        }
+        audioOutput.flush()
+    }
+    #endif
 }
 
 extension KSMEPlayer: MEPlayerDelegate {
     func sourceDidOpened() {
         isReadyToPlay = true
         options.readyTime = CACurrentMediaTime()
-        let audioDescriptor = tracks(mediaType: .audio).first { $0.isEnabled }.flatMap {
-            $0 as? FFmpegAssetTrack
-        }?.audioDescriptor ?? .defaultValue
-        options.setAudioSession(audioDescriptor: audioDescriptor)
         let vidoeTracks = tracks(mediaType: .video)
-        if vidoeTracks.count == 0 {
+        if vidoeTracks.isEmpty {
             videoOutput = nil
         }
-        let fps = vidoeTracks.first { $0.isEnabled }.map(\.nominalFrameRate) ?? 24
-        runInMainqueue { [weak self] in
+        let audioDescriptor = tracks(mediaType: .audio).first { $0.isEnabled }.flatMap {
+            $0 as? FFmpegAssetTrack
+        }?.audioDescriptor
+        runOnMainThread { [weak self] in
             guard let self else { return }
-            self.audioOutput.prepare(audioFormat: self.options.audioFormat)
-            self.videoOutput?.prepare(fps: fps, startPlayTime: self.options.startPlayTime)
-            self.videoOutput?.play()
-            self.delegate?.readyToPlay(player: self)
+            if let audioDescriptor {
+                KSLog("[audio] audio type: \(audioOutput) prepare audioFormat )")
+                audioOutput.prepare(audioFormat: audioDescriptor.audioFormat)
+            }
+            if let controlTimebase = videoOutput?.displayLayer.controlTimebase, options.startPlayTime > 1 {
+                CMTimebaseSetTime(controlTimebase, time: CMTimeMake(value: Int64(options.startPlayTime), timescale: 1))
+            }
+            delegate?.readyToPlay(player: self)
         }
     }
 
     func sourceDidFailed(error: NSError?) {
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             guard let self else { return }
             self.delegate?.finish(player: self, error: error)
         }
     }
 
     func sourceDidFinished() {
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             guard let self else { return }
             if self.options.isLoopPlay {
                 self.loopCount += 1
                 self.delegate?.playBack(player: self, loopCount: self.loopCount)
-                self.audioOutput.play(time: 0)
+                self.audioOutput.play()
                 self.videoOutput?.play()
             } else {
                 self.playbackState = .finished
@@ -193,10 +242,10 @@ extension KSMEPlayer: MEPlayerDelegate {
             playableTime = currentPlaybackTime + loadingState.loadedTime
         }
         if loadState == .playable {
-            if !loadingState.isEndOfFile, loadingState.frameCount == 0, loadingState.packetCount == 0 || !(loadingState.isFirst || loadingState.isSeek) {
+            if !loadingState.isEndOfFile, loadingState.frameCount == 0, loadingState.packetCount == 0, options.preferredForwardBufferDuration != 0 {
                 loadState = .loading
                 if playbackState == .playing {
-                    runInMainqueue { [weak self] in
+                    runOnMainThread { [weak self] in
                         // 在主线程更新进度
                         self?.bufferingProgress = 0
                     }
@@ -221,10 +270,15 @@ extension KSMEPlayer: MEPlayerDelegate {
                 }
             }
             if playbackState == .playing {
-                runInMainqueue { [weak self] in
+                runOnMainThread { [weak self] in
                     // 在主线程更新进度
                     self?.bufferingProgress = progress
                 }
+            }
+        }
+        if duration == 0, playbackState == .playing, loadState == .playable {
+            if let rate = options.liveAdaptivePlaybackRate(loadingState: loadingState) {
+                playbackRate = rate
             }
         }
     }
@@ -235,6 +289,10 @@ extension KSMEPlayer: MEPlayerDelegate {
 }
 
 extension KSMEPlayer: MediaPlayerProtocol {
+    public var chapters: [Chapter] {
+        playerItem.chapters
+    }
+
     public var subtitleDataSouce: SubtitleDataSouce? { self }
     public var playbackVolume: Float {
         get {
@@ -247,6 +305,7 @@ extension KSMEPlayer: MediaPlayerProtocol {
 
     public var isPlaying: Bool { playbackState == .playing }
 
+    @MainActor
     public var naturalSize: CGSize {
         options.display == .plane ? playerItem.naturalSize : KSOptions.sceneSize
     }
@@ -263,7 +322,8 @@ extension KSMEPlayer: MediaPlayerProtocol {
         if options.videoDisable {
             videoOutput = nil
         } else if videoOutput == nil {
-            videoOutput = MetalPlayView(options: options)
+            videoOutput = KSOptions.videoPlayerType.init(options: options)
+            videoOutput?.displayLayerDelegate = self
         }
         self.options = options
         playerItem.delegate = self
@@ -271,13 +331,13 @@ extension KSMEPlayer: MediaPlayerProtocol {
         videoOutput?.renderSource = playerItem
         videoOutput?.options = options
         if KSOptions.isClearVideoWhereReplace {
-            videoOutput?.clear()
+            videoOutput?.flush()
         }
     }
 
     public var currentPlaybackTime: TimeInterval {
         get {
-            playerItem.currentPlaybackTime - playerItem.startTime
+            playerItem.currentPlaybackTime
         }
         set {
             seek(time: newValue) { _ in }
@@ -286,12 +346,18 @@ extension KSMEPlayer: MediaPlayerProtocol {
 
     public var duration: TimeInterval { playerItem.duration }
 
+    public var fileSize: Double { playerItem.fileSize }
+
     public var seekable: Bool { playerItem.seekable }
+
+    public var dynamicInfo: DynamicInfo? {
+        playerItem.dynamicInfo
+    }
 
     public func seek(time: TimeInterval, completion: @escaping ((Bool) -> Void)) {
         let time = max(time, 0)
         playbackState = .seeking
-        runInMainqueue { [weak self] in
+        runOnMainThread { [weak self] in
             self?.bufferingProgress = 0
         }
         let seekTime: TimeInterval
@@ -300,12 +366,15 @@ extension KSMEPlayer: MediaPlayerProtocol {
         } else {
             seekTime = time
         }
-        audioOutput.flush()
-        playerItem.seek(time: seekTime + playerItem.startTime) { [weak self] result in
+        playerItem.seek(time: seekTime) { [weak self] result in
             guard let self else { return }
             if result {
-                if let controlTimebase = self.videoOutput?.displayView.displayLayer.controlTimebase {
-                    CMTimebaseSetTime(controlTimebase, time: CMTimeMake(value: Int64(self.currentPlaybackTime), timescale: 1))
+                self.audioOutput.flush()
+                runOnMainThread { [weak self] in
+                    guard let self else { return }
+                    if let controlTimebase = self.videoOutput?.displayLayer.controlTimebase {
+                        CMTimebaseSetTime(controlTimebase, time: CMTimeMake(value: Int64(self.currentPlaybackTime), timescale: 1))
+                    }
                 }
             }
             completion(result)
@@ -322,11 +391,17 @@ extension KSMEPlayer: MediaPlayerProtocol {
     public func play() {
         KSLog("play \(self)")
         playbackState = .playing
+        if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
+            pipController?.invalidatePlaybackState()
+        }
     }
 
     public func pause() {
         KSLog("pause \(self)")
         playbackState = .paused
+        if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
+            pipController?.invalidatePlaybackState()
+        }
     }
 
     public func shutdown() {
@@ -349,6 +424,7 @@ extension KSMEPlayer: MediaPlayerProtocol {
         options.decodeVideoTime = 0
     }
 
+    @MainActor
     public var contentMode: UIViewContentMode {
         get {
             view?.contentMode ?? .center
@@ -359,7 +435,7 @@ extension KSMEPlayer: MediaPlayerProtocol {
     }
 
     public func thumbnailImageAtCurrentTime() async -> CGImage? {
-        await videoOutput?.pixelBuffer?.cgImage()
+        videoOutput?.pixelBuffer?.cgImage()
     }
 
     public func enterBackground() {}
@@ -387,22 +463,10 @@ extension KSMEPlayer: MediaPlayerProtocol {
     }
 
     public func select(track: some MediaPlayerTrack) {
-        if track.mediaType == .video {
-            let fps = tracks(mediaType: .video).first { $0.isEnabled }.map(\.nominalFrameRate) ?? 24
-            if fps != track.nominalFrameRate {
-                videoOutput?.prepare(fps: fps)
-            }
+        let isSeek = playerItem.select(track: track)
+        if isSeek {
+            audioOutput.flush()
         }
-        if track.mediaType == .audio {
-            let audioDescriptor = tracks(mediaType: .audio).first { $0.isEnabled }.flatMap {
-                $0 as? FFmpegAssetTrack
-            }?.audioDescriptor ?? .defaultValue
-            if let assetTrack = track as? FFmpegAssetTrack, assetTrack.audioDescriptor != audioDescriptor {
-                options.setAudioSession(audioDescriptor: audioDescriptor)
-                audioOutput.prepare(audioFormat: options.audioFormat)
-            }
-        }
-        playerItem.select(track: track)
     }
 }
 
@@ -501,59 +565,23 @@ extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
     }
 }
 
-// MARK: - public functions
+extension KSMEPlayer: DisplayLayerDelegate {
+    public func change(displayLayer: AVSampleBufferDisplayLayer) {
+        if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
+            let contentSource = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: displayLayer, playbackDelegate: self)
+            _pipController = KSPictureInPictureController(contentSource: contentSource)
+            // 更改contentSource会直接crash
+//            pipController?.contentSource = contentSource
+        }
+    }
+}
 
 public extension KSMEPlayer {
-    var metadata: [String: String] {
-        playerItem.metadata
+    func startRecord(url: URL) {
+        playerItem.startRecord(url: url)
     }
 
-    var bytesRead: Int64 {
-        playerItem.bytesRead
-    }
-
-    var attackTime: Float {
-        get {
-            audioOutput.attackTime
-        }
-        set {
-            audioOutput.attackTime = newValue
-        }
-    }
-
-    var releaseTime: Float {
-        get {
-            audioOutput.releaseTime
-        }
-        set {
-            audioOutput.releaseTime = newValue
-        }
-    }
-
-    var threshold: Float {
-        get {
-            audioOutput.threshold
-        }
-        set {
-            audioOutput.threshold = newValue
-        }
-    }
-
-    var expansionRatio: Float {
-        get {
-            audioOutput.expansionRatio
-        }
-        set {
-            audioOutput.expansionRatio = newValue
-        }
-    }
-
-    var overallGain: Float {
-        get {
-            audioOutput.overallGain
-        }
-        set {
-            audioOutput.overallGain = newValue
-        }
+    func stoptRecord() {
+        playerItem.stopRecord()
     }
 }

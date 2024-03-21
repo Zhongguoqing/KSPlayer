@@ -8,6 +8,7 @@
 import CloudKit
 import CoreData
 import KSPlayer
+
 struct PersistenceController {
     static let shared = PersistenceController()
 
@@ -27,9 +28,11 @@ struct PersistenceController {
             "https://iptv-org.github.io/iptv/categories/movies.m3u",
             "https://iptv-org.github.io/iptv/languages/zho.m3u",
             "https://iptv-org.github.io/iptv/languages/eng.m3u",
-            "https://raw.githubusercontent.com/kingslay/KSPlayer/develop/Tests/KSPlayerTests/test.m3u",
+            "https://raw.githubusercontent.com/kingslay/TestVideo/main/test.m3u",
+            "https://raw.githubusercontent.com/kingslay/TestVideo/main/TestVideo.m3u",
+            "https://raw.githubusercontent.com/kingslay/bulaoge/main/bulaoge.m3u",
         ]
-        urls.forEach { str in
+        for str in urls {
             if let url = URL(string: str) {
                 _ = M3UModel(context: viewContext, url: url)
             }
@@ -46,33 +49,20 @@ struct PersistenceController {
     }()
 
     let container: NSPersistentCloudKitContainer
-
+    let viewContext: NSManagedObjectContext
     init(inMemory: Bool = false) {
-        container = NSPersistentCloudKitContainer(name: "Model")
-        let publicURL: URL
-        let privateURL: URL
-        if inMemory {
-            publicURL = URL(fileURLWithPath: "/dev/null")
-            privateURL = URL(fileURLWithPath: "/dev/null")
-        } else {
-            let directory = container.persistentStoreDescriptions.first!.url!.deletingLastPathComponent()
-            KSLog("coreData directory \(directory)")
-            publicURL = directory.appendingPathComponent("public.sqlite")
-            privateURL = directory.appendingPathComponent("private.sqlite")
+        let modelName = "Model"
+        // load Data Model
+        guard let url = Bundle.main.url(forResource: modelName, withExtension: "momd"),
+              let model = NSManagedObjectModel(contentsOf: url)
+        else {
+            fatalError("Can't get \(modelName).momd in Bundle")
         }
-        let publicDesc = NSPersistentStoreDescription(url: publicURL)
-        publicDesc.configuration = "public"
-        publicDesc.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.kintan.tracy")
-        publicDesc.cloudKitContainerOptions?.databaseScope = .public
-        publicDesc.setOption(true as NSObject, forKey: NSPersistentHistoryTrackingKey)
-        publicDesc.setOption(true as NSObject, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        let privateDesc = NSPersistentStoreDescription(url: privateURL)
-        privateDesc.configuration = "private"
-        privateDesc.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.kintan.tracy")
-        privateDesc.setOption(true as NSObject, forKey: NSPersistentHistoryTrackingKey)
-        privateDesc.setOption(true as NSObject, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        container.persistentStoreDescriptions = [publicDesc, privateDesc]
-        let persistentStoreCoordinator = container.persistentStoreCoordinator
+        container = NSPersistentCloudKitContainer(name: modelName, managedObjectModel: model)
+        viewContext = container.viewContext
+        if inMemory {
+            container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
+        }
         container.loadPersistentStores { storeDescription, error in
             if let error = error as NSError? {
                 // Replace this implementation with code to handle the error appropriately.
@@ -94,14 +84,5 @@ struct PersistenceController {
             }
         }
         container.viewContext.automaticallyMergesChangesFromParent = true
-        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-//        #if DEBUG
-//        container.viewContext.mergePolicy = NSRollbackMergePolicy
-//        #endif
-        do {
-            try container.viewContext.setQueryGenerationFrom(.current)
-        } catch {
-            fatalError("Failed to pin viewContext to the current generation:\(error)")
-        }
     }
 }

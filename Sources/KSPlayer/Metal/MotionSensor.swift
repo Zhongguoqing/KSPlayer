@@ -2,7 +2,7 @@
 //  MotionSensor.swift
 //  KSPlayer-iOS
 //
-//  Created by wangjinbian on 2020/1/13.
+//  Created by kintan on 2020/1/13.
 //
 
 #if canImport(UIKit) && canImport(CoreMotion)
@@ -10,6 +10,8 @@ import CoreMotion
 import Foundation
 import simd
 import UIKit
+
+@MainActor
 final class MotionSensor {
     static let shared = MotionSensor()
     private let manager = CMMotionManager()

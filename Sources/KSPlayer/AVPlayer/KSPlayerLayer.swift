@@ -50,9 +50,10 @@ public enum KSPlayerState: CustomStringConvertible {
         }
     }
 
-    public var isPlaying: Bool { self == .readyToPlay || self == .buffering || self == .bufferFinished }
+    public var isPlaying: Bool { self == .buffering || self == .bufferFinished }
 }
 
+@MainActor
 public protocol KSPlayerLayerDelegate: AnyObject {
     func player(layer: KSPlayerLayer, state: KSPlayerState)
     func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval)
@@ -60,11 +61,14 @@ public protocol KSPlayerLayerDelegate: AnyObject {
     func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval)
 }
 
-open class KSPlayerLayer: UIView {
+open class KSPlayerLayer: NSObject {
     public weak var delegate: KSPlayerLayerDelegate?
-    @Published public var bufferingProgress: Int = 0
-    @Published public var loopCount: Int = 0
-    @Published public var isPipActive = false {
+    @Published
+    public var bufferingProgress: Int = 0
+    @Published
+    public var loopCount: Int = 0
+    @Published
+    public var isPipActive = false {
         didSet {
             if #available(tvOS 14.0, *) {
                 guard let pipController = player.pipController else {
@@ -72,6 +76,7 @@ open class KSPlayerLayer: UIView {
                 }
 
                 if isPipActive {
+                    // 一定要async才不会pip之后就暂停播放
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         pipController.start(view: self)
@@ -84,10 +89,29 @@ open class KSPlayerLayer: UIView {
     }
 
     public private(set) var options: KSOptions
+
     public var player: MediaPlayerProtocol {
         didSet {
-            oldValue.view?.removeFromSuperview()
             KSLog("player is \(player)")
+            runOnMainThread { [weak self] in
+                guard let self else { return }
+                if let oldView = oldValue.view, let superview = oldView.superview, let view = player.view {
+                    superview.addSubview(view)
+                    #if canImport(UIKit)
+                    superview.insertSubview(view, belowSubview: oldView)
+                    #else
+                    superview.addSubview(view, positioned: .below, relativeTo: oldView)
+                    #endif
+                    view.translatesAutoresizingMaskIntoConstraints = false
+                    NSLayoutConstraint.activate([
+                        view.topAnchor.constraint(equalTo: superview.topAnchor),
+                        view.leadingAnchor.constraint(equalTo: superview.leadingAnchor),
+                        view.bottomAnchor.constraint(equalTo: superview.bottomAnchor),
+                        view.trailingAnchor.constraint(equalTo: superview.trailingAnchor),
+                    ])
+                }
+                oldValue.view?.removeFromSuperview()
+            }
             player.playbackRate = oldValue.playbackRate
             player.playbackVolume = oldValue.playbackVolume
             player.delegate = self
@@ -128,15 +152,14 @@ open class KSPlayerLayer: UIView {
     }
 
     /// 播发器的几种状态
+
     public private(set) var state = KSPlayerState.prepareToPlay {
-        didSet {
-            if state != oldValue {
-                runInMainqueue { [weak self] in
-                    guard let self else {
-                        return
-                    }
-                    KSLog("playerStateDidChange - \(self.state)")
-                    self.delegate?.player(layer: self, state: self.state)
+        willSet {
+            if state != newValue {
+                runOnMainThread { [weak self] in
+                    guard let self else { return }
+                    KSLog("playerStateDidChange - \(newValue)")
+                    self.delegate?.player(layer: self, state: newValue)
                 }
             }
         }
@@ -176,19 +199,24 @@ open class KSPlayerLayer: UIView {
             firstPlayerType = KSOptions.firstPlayerType
         }
         player = firstPlayerType.init(url: url, options: options)
-        player.playbackRate = options.startPlayRate
         isAutoPlay = options.isAutoPlay
-        super.init(frame: .zero)
-        if options.registerRemoteControll{
+        super.init()
+        player.playbackRate = options.startPlayRate
+        if options.registerRemoteControll {
             registerRemoteControllEvent()
         }
         player.delegate = self
         player.contentMode = .scaleAspectFit
         prepareToPlay()
         #if canImport(UIKit)
-        NotificationCenter.default.addObserver(self, selector: #selector(enterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(enterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            NotificationCenter.default.addObserver(self, selector: #selector(enterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(enterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+        #if !os(xrOS)
         NotificationCenter.default.addObserver(self, selector: #selector(wirelessRouteActiveDidChange(notification:)), name: .MPVolumeViewWirelessRouteActiveDidChange, object: nil)
+        #endif
         #endif
         #if !os(macOS)
         NotificationCenter.default.addObserver(self, selector: #selector(audioInterrupted), name: AVAudioSession.interruptionNotification, object: nil)
@@ -206,14 +234,24 @@ open class KSPlayerLayer: UIView {
         }
         NotificationCenter.default.removeObserver(self)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        #if os(tvOS)
-        UIApplication.shared.windows.first?.avDisplayManager.preferredDisplayCriteria = nil
-        #endif
+        MPRemoteCommandCenter.shared().playCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().pauseCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().togglePlayPauseCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().stopCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().nextTrackCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().previousTrackCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().changeRepeatModeCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().changePlaybackRateCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().skipForwardCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().skipBackwardCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().changePlaybackPositionCommand.removeTarget(nil)
+        MPRemoteCommandCenter.shared().enableLanguageOptionCommand.removeTarget(nil)
+        options.playerLayerDeinit()
     }
 
     public func set(url: URL, options: KSOptions) {
         self.options = options
-        runInMainqueue {
+        runOnMainThread {
             self.isAutoPlay = options.isAutoPlay
             self.url = url
         }
@@ -224,7 +262,7 @@ open class KSPlayerLayer: UIView {
         self.urls.removeAll()
         self.urls.append(contentsOf: urls)
         if let first = urls.first {
-            runInMainqueue {
+            runOnMainThread {
                 self.isAutoPlay = options.isAutoPlay
                 self.url = first
             }
@@ -232,26 +270,25 @@ open class KSPlayerLayer: UIView {
     }
 
     open func play() {
-        UIApplication.shared.isIdleTimerDisabled = true
+        runOnMainThread {
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
         isAutoPlay = true
+        if state == .error {
+            player.prepareToPlay()
+        }
         if player.isReadyToPlay {
             if state == .playedToTheEnd {
-                Task {
-                    player.seek(time: 0) { [weak self] finished in
-                        guard let self else { return }
-                        if finished {
-                            self.player.play()
-                        }
+                player.seek(time: 0) { [weak self] finished in
+                    guard let self else { return }
+                    if finished {
+                        self.player.play()
                     }
                 }
             } else {
                 player.play()
             }
             timer.fireDate = Date.distantPast
-        } else {
-            if state == .error {
-                player.prepareToPlay()
-            }
         }
         state = player.loadState == .playable ? .bufferFinished : .buffering
         MPNowPlayingInfoCenter.default().playbackState = .playing
@@ -265,8 +302,10 @@ open class KSPlayerLayer: UIView {
         player.pause()
         timer.fireDate = Date.distantFuture
         state = .paused
-        UIApplication.shared.isIdleTimerDisabled = false
         MPNowPlayingInfoCenter.default().playbackState = .paused
+        runOnMainThread {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 
     public func resetPlayer() {
@@ -276,18 +315,17 @@ open class KSPlayerLayer: UIView {
         shouldSeekTo = 0
         player.playbackRate = 1
         player.playbackVolume = 1
-        UIApplication.shared.isIdleTimerDisabled = false
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        #if os(tvOS)
-        UIApplication.shared.windows.first?.avDisplayManager.preferredDisplayCriteria = nil
-        #endif
+        runOnMainThread {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 
     open func seek(time: TimeInterval, autoPlay: Bool, completion: @escaping ((Bool) -> Void)) {
         if time.isInfinite || time.isNaN {
             completion(false)
         }
-        if player.isReadyToPlay {
+        if player.isReadyToPlay, player.seekable {
             player.seek(time: time) { [weak self] finished in
                 guard let self else { return }
                 if finished, autoPlay {
@@ -301,19 +339,6 @@ open class KSPlayerLayer: UIView {
             completion(false)
         }
     }
-
-    override open func didAddSubview(_ subview: UIView) {
-        super.didAddSubview(subview)
-        if subview == player.view {
-            subview.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                subview.leftAnchor.constraint(equalTo: leftAnchor),
-                subview.topAnchor.constraint(equalTo: topAnchor),
-                subview.bottomAnchor.constraint(equalTo: bottomAnchor),
-                subview.rightAnchor.constraint(equalTo: rightAnchor),
-            ])
-        }
-    }
 }
 
 // MARK: - MediaPlayerDelegate
@@ -321,24 +346,31 @@ open class KSPlayerLayer: UIView {
 extension KSPlayerLayer: MediaPlayerDelegate {
     public func readyToPlay(player: some MediaPlayerProtocol) {
         #if os(macOS)
-        if let window {
-            window.isMovableByWindowBackground = true
-            let naturalSize = player.naturalSize
-            if naturalSize.width > 0, naturalSize.height > 0 {
-                window.aspectRatio = naturalSize
-                var frame = window.frame
-                frame.size.height = frame.width * naturalSize.height / naturalSize.width
-                window.setFrame(frame, display: true)
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            if let window = player.view?.window {
+                window.isMovableByWindowBackground = true
+                if options.automaticWindowResize {
+                    let naturalSize = player.naturalSize
+                    if naturalSize.width > 0, naturalSize.height > 0 {
+                        window.aspectRatio = naturalSize
+                        var frame = window.frame
+                        frame.size.height = frame.width * naturalSize.height / naturalSize.width
+                        window.setFrame(frame, display: true)
+                    }
+                }
             }
         }
         #endif
         updateNowPlayingInfo()
         state = .readyToPlay
-        for track in player.tracks(mediaType: .video) where track.isEnabled {
-            #if os(tvOS)
-            setDisplayCriteria(track: track)
-            #endif
+        #if os(iOS)
+        if #available(iOS 14.2, *) {
+            if options.canStartPictureInPictureAutomaticallyFromInline {
+                player.pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+            }
         }
+        #endif
         if isAutoPlay {
             if shouldSeekTo > 0 {
                 seek(time: shouldSeekTo, autoPlay: true) { [weak self] _ in
@@ -356,7 +388,10 @@ extension KSPlayerLayer: MediaPlayerDelegate {
         guard player.playbackState != .seeking else { return }
         if player.loadState == .playable, startTime > 0 {
             let diff = CACurrentMediaTime() - startTime
-            delegate?.player(layer: self, bufferedCount: bufferedCount, consumeTime: diff)
+            runOnMainThread { [weak self] in
+                guard let self else { return }
+                delegate?.player(layer: self, bufferedCount: bufferedCount, consumeTime: diff)
+            }
             if bufferedCount == 0 {
                 var dic = ["firstTime": diff]
                 if options.tcpConnectedTime > 0 {
@@ -408,12 +443,18 @@ extension KSPlayerLayer: MediaPlayerDelegate {
             KSLog(error as CustomStringConvertible)
         } else {
             let duration = player.duration
-            delegate?.player(layer: self, currentTime: duration, totalTime: duration)
+            runOnMainThread { [weak self] in
+                guard let self else { return }
+                delegate?.player(layer: self, currentTime: duration, totalTime: duration)
+            }
             state = .playedToTheEnd
         }
         timer.fireDate = Date.distantFuture
         bufferedCount = 1
-        delegate?.player(layer: self, finish: error)
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            delegate?.player(layer: self, finish: error)
+        }
         if error == nil {
             nextPlayer()
         }
@@ -436,36 +477,10 @@ extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
 // MARK: - private functions
 
 extension KSPlayerLayer {
-    #if os(tvOS)
-    private func setDisplayCriteria(track: some MediaPlayerTrack) {
-        guard let displayManager = UIApplication.shared.windows.first?.avDisplayManager,
-              displayManager.isDisplayCriteriaMatchingEnabled,
-              !displayManager.isDisplayModeSwitchInProgress
-        else {
-            return
-        }
-        if let criteria = options.preferredDisplayCriteria(refreshRate: track.nominalFrameRate,
-                                                           videoDynamicRange: track.dynamicRange(options).rawValue)
-        {
-            displayManager.preferredDisplayCriteria = criteria
-        }
-    }
-    #endif
-
     private func prepareToPlay() {
         startTime = CACurrentMediaTime()
         bufferedCount = 0
         player.prepareToPlay()
-        if isAutoPlay {
-            DispatchQueue.main.async {
-                self.state = .buffering
-            }
-        } else {
-            state = .prepareToPlay
-        }
-        if let view = player.view {
-            addSubview(view)
-        }
     }
 
     private func updateNowPlayingInfo() {
@@ -473,6 +488,12 @@ extension KSPlayerLayer {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyPlaybackDuration: player.duration]
         } else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyPlaybackDuration] = player.duration
+        }
+        if MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] == nil, let title = player.dynamicInfo?.metadata["title"] {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] = title
+        }
+        if MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtist] == nil, let artist = player.dynamicInfo?.metadata["artist"] {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtist] = artist
         }
         var current: [MPNowPlayingInfoLanguageOption] = []
         var langs: [MPNowPlayingInfoLanguageOptionGroup] = []
@@ -486,7 +507,7 @@ extension KSPlayerLayer {
                 }
             }
         }
-        if langs.count > 0 {
+        if !langs.isEmpty {
             MPRemoteCommandCenter.shared().enableLanguageOptionCommand.isEnabled = true
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyAvailableLanguageOptions] = langs
@@ -512,7 +533,7 @@ extension KSPlayerLayer {
         }
     }
 
-    private func registerRemoteControllEvent() {
+    public func registerRemoteControllEvent() {
         let remoteCommand = MPRemoteCommandCenter.shared()
         remoteCommand.playCommand.addTarget { [weak self] _ in
             guard let self else {
@@ -635,7 +656,8 @@ extension KSPlayerLayer {
         }
     }
 
-    #if canImport(UIKit)
+    #if canImport(UIKit) && !os(xrOS)
+    @MainActor
     @objc private func wirelessRouteActiveDidChange(notification: Notification) {
         guard let volumeView = notification.object as? MPVolumeView, isWirelessRouteActive != volumeView.isWirelessRouteActive else { return }
         if volumeView.isWirelessRouteActive {

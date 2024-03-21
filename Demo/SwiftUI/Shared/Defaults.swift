@@ -11,129 +11,177 @@ import SwiftUI
 
 public class Defaults: ObservableObject {
     @AppStorage("showRecentPlayList") public var showRecentPlayList = false
-    @AppStorage("isUseAudioRenderer") public var isUseAudioRenderer = KSOptions.isUseAudioRenderer {
-        didSet {
-            KSOptions.isUseAudioRenderer = isUseAudioRenderer
-        }
-    }
 
-    @AppStorage("hardwareDecode") public var hardwareDecode = KSOptions.hardwareDecode {
+    @AppStorage("hardwareDecode")
+    public var hardwareDecode = KSOptions.hardwareDecode {
         didSet {
             KSOptions.hardwareDecode = hardwareDecode
         }
     }
 
-    @AppStorage("isUseDisplayLayer") public var isUseDisplayLayer = MEOptions.isUseDisplayLayer {
+    @AppStorage("asynchronousDecompression")
+    public var asynchronousDecompression = KSOptions.asynchronousDecompression {
+        didSet {
+            KSOptions.asynchronousDecompression = asynchronousDecompression
+        }
+    }
+
+    @AppStorage("isUseDisplayLayer")
+    public var isUseDisplayLayer = MEOptions.isUseDisplayLayer {
         didSet {
             MEOptions.isUseDisplayLayer = isUseDisplayLayer
         }
     }
 
-    @AppStorage("preferredForwardBufferDuration") public var preferredForwardBufferDuration = KSOptions.preferredForwardBufferDuration {
+    @AppStorage("preferredForwardBufferDuration")
+    public var preferredForwardBufferDuration = KSOptions.preferredForwardBufferDuration {
         didSet {
             KSOptions.preferredForwardBufferDuration = preferredForwardBufferDuration
         }
     }
 
-    @AppStorage("maxBufferDuration") public var maxBufferDuration = KSOptions.maxBufferDuration {
+    @AppStorage("maxBufferDuration")
+    public var maxBufferDuration = KSOptions.maxBufferDuration {
         didSet {
             KSOptions.maxBufferDuration = maxBufferDuration
         }
     }
 
-    @AppStorage("isLoopPlay") public var isLoopPlay = KSOptions.isLoopPlay {
+    @AppStorage("isLoopPlay")
+    public var isLoopPlay = KSOptions.isLoopPlay {
         didSet {
             KSOptions.isLoopPlay = isLoopPlay
         }
     }
 
-    @AppStorage("canBackgroundPlay") public var canBackgroundPlay = true {
+    @AppStorage("canBackgroundPlay")
+    public var canBackgroundPlay = true {
         didSet {
             KSOptions.canBackgroundPlay = canBackgroundPlay
         }
     }
 
-    @AppStorage("isAutoPlay") public var isAutoPlay = true {
+    @AppStorage("isAutoPlay")
+    public var isAutoPlay = true {
         didSet {
             KSOptions.isAutoPlay = isAutoPlay
         }
     }
 
-    @AppStorage("isSecondOpen") public var isSecondOpen = true {
+    @AppStorage("isSecondOpen")
+    public var isSecondOpen = true {
         didSet {
             KSOptions.isSecondOpen = isSecondOpen
         }
     }
 
-    @AppStorage("isAccurateSeek") public var isAccurateSeek = true {
+    @AppStorage("isAccurateSeek")
+    public var isAccurateSeek = true {
         didSet {
             KSOptions.isAccurateSeek = isAccurateSeek
         }
     }
 
-    @AppStorage("isPipPopViewController") public var isPipPopViewController = true {
+    @AppStorage("isPipPopViewController")
+    public var isPipPopViewController = true {
         didSet {
             KSOptions.isPipPopViewController = isPipPopViewController
         }
     }
 
-    @AppStorage("textFontSize") public var textFontSize = SubtitleModel.textFontSize {
+    @AppStorage("textFontSize")
+    public var textFontSize = SubtitleModel.textFontSize {
         didSet {
             SubtitleModel.textFontSize = textFontSize
         }
     }
 
-    @AppStorage("textBold") public var textBold = SubtitleModel.textBold {
+    @AppStorage("textBold")
+    public var textBold = SubtitleModel.textBold {
         didSet {
             SubtitleModel.textBold = textBold
         }
     }
 
-    @AppStorage("textItalic") public var textItalic = SubtitleModel.textItalic {
+    @AppStorage("textItalic")
+    public var textItalic = SubtitleModel.textItalic {
         didSet {
             SubtitleModel.textItalic = textItalic
         }
     }
 
-    @AppStorage("textColor") public var textColor = SubtitleModel.textColor {
+    @AppStorage("textColor")
+    public var textColor = SubtitleModel.textColor {
         didSet {
             SubtitleModel.textColor = textColor
         }
     }
 
-    @AppStorage("textBackgroundColor") public var textBackgroundColor = SubtitleModel.textBackgroundColor {
+    @AppStorage("textBackgroundColor")
+    public var textBackgroundColor = SubtitleModel.textBackgroundColor {
         didSet {
             SubtitleModel.textBackgroundColor = textBackgroundColor
         }
     }
 
-    @AppStorage("textXAlign") public var textXAlign = SubtitleModel.textXAlign {
+    @AppStorage("horizontalAlign")
+    public var horizontalAlign = SubtitleModel.textPosition.horizontalAlign {
         didSet {
-            SubtitleModel.textXAlign = textXAlign
+            SubtitleModel.textPosition.horizontalAlign = horizontalAlign
         }
     }
 
-    @AppStorage("textYAlign") public var textYAlign = SubtitleModel.textYAlign {
+    @AppStorage("verticalAlign")
+    public var verticalAlign = SubtitleModel.textPosition.verticalAlign {
         didSet {
-            SubtitleModel.textYAlign = textYAlign
+            SubtitleModel.textPosition.verticalAlign = verticalAlign
         }
     }
 
-    @AppStorage("textXMargin") public var textXMargin = SubtitleModel.textXMargin {
+    @AppStorage("leftMargin")
+    public var leftMargin = SubtitleModel.textPosition.leftMargin {
         didSet {
-            SubtitleModel.textXMargin = textXMargin
+            SubtitleModel.textPosition.leftMargin = leftMargin
         }
     }
 
-    @AppStorage("textYMargin") public var textYMargin = SubtitleModel.textYMargin {
+    @AppStorage("rightMargin")
+    public var rightMargin = SubtitleModel.textPosition.rightMargin {
         didSet {
-            SubtitleModel.textYMargin = textYMargin
+            SubtitleModel.textPosition.rightMargin = rightMargin
+        }
+    }
+
+    @AppStorage("verticalMargin")
+    public var verticalMargin = SubtitleModel.textPosition.verticalMargin {
+        didSet {
+            SubtitleModel.textPosition.verticalMargin = verticalMargin
+        }
+    }
+
+    @AppStorage("displayCriteriaFormatDescriptionEnabled")
+    public var displayCriteriaFormatDescriptionEnabled = KSOptions.displayCriteriaFormatDescriptionEnabled {
+        didSet {
+            KSOptions.displayCriteriaFormatDescriptionEnabled = displayCriteriaFormatDescriptionEnabled
+        }
+    }
+
+    @AppStorage("yadifMode")
+    public var yadifMode = MEOptions.yadifMode {
+        didSet {
+            MEOptions.yadifMode = yadifMode
+        }
+    }
+
+    @AppStorage("audioPlayerType")
+    public var audioPlayerType = NSStringFromClass(KSOptions.audioPlayerType) {
+        didSet {
+            KSOptions.audioPlayerType = NSClassFromString(audioPlayerType) as! any AudioOutput.Type
         }
     }
 
     public static let shared = Defaults()
     private init() {
-        KSOptions.isUseAudioRenderer = isUseAudioRenderer
         KSOptions.hardwareDecode = hardwareDecode
         MEOptions.isUseDisplayLayer = isUseDisplayLayer
         SubtitleModel.textFontSize = textFontSize
@@ -141,10 +189,11 @@ public class Defaults: ObservableObject {
         SubtitleModel.textItalic = textItalic
         SubtitleModel.textColor = textColor
         SubtitleModel.textBackgroundColor = textBackgroundColor
-        SubtitleModel.textXAlign = textXAlign
-        SubtitleModel.textYAlign = textYAlign
-        SubtitleModel.textXMargin = textXMargin
-        SubtitleModel.textYMargin = textYMargin
+        SubtitleModel.textPosition.horizontalAlign = horizontalAlign
+        SubtitleModel.textPosition.verticalAlign = verticalAlign
+        SubtitleModel.textPosition.leftMargin = leftMargin
+        SubtitleModel.textPosition.rightMargin = rightMargin
+        SubtitleModel.textPosition.verticalMargin = verticalMargin
         KSOptions.preferredForwardBufferDuration = preferredForwardBufferDuration
         KSOptions.maxBufferDuration = maxBufferDuration
         KSOptions.isLoopPlay = isLoopPlay
@@ -153,6 +202,8 @@ public class Defaults: ObservableObject {
         KSOptions.isSecondOpen = isSecondOpen
         KSOptions.isAccurateSeek = isAccurateSeek
         KSOptions.isPipPopViewController = isPipPopViewController
+        MEOptions.yadifMode = yadifMode
+        KSOptions.audioPlayerType = NSClassFromString(audioPlayerType) as! any AudioOutput.Type
     }
 }
 

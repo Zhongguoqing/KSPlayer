@@ -10,7 +10,7 @@ import AVFoundation
 import KSPlayer
 import UIKit
 
-@UIApplicationMain
+@main
 class AppDelegate: UIResponder, UIApplicationDelegate, UISplitViewControllerDelegate {
     var window: UIWindow?
     func application(_: UIApplication, didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
@@ -24,7 +24,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UISplitViewControllerDele
         KSOptions.isSecondOpen = true
         KSOptions.isAccurateSeek = true
 //        KSOptions.isLoopPlay = true
-        if UIDevice.current.userInterfaceIdiom == .phone || UIDevice.current.userInterfaceIdiom == .tv {
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            window.rootViewController = UINavigationController(rootViewController: MasterViewController())
+        } else if UIDevice.current.userInterfaceIdiom == .tv {
             window.rootViewController = UINavigationController(rootViewController: MasterViewController())
         } else {
             let splitViewController = UISplitViewController()
@@ -70,15 +72,15 @@ class CustomVideoPlayerView: VideoPlayerView {
             print(layer.player.naturalSize)
             // list the all subtitles
             let subtitleInfos = srtControl.subtitleInfos
-            subtitleInfos.forEach {
-                print($0.name)
+            for subtitleInfo in subtitleInfos {
+                print(subtitleInfo.name)
             }
             srtControl.selectedSubtitleInfo = subtitleInfos.first
             for track in layer.player.tracks(mediaType: .audio) {
                 print("audio name: \(track.name) language: \(track.language ?? "")")
             }
             for track in layer.player.tracks(mediaType: .video) {
-                print("video name: \(track.name) bitRate: \(track.bitRate) fps: \(track.nominalFrameRate) depth: \(track.depth) colorPrimaries: \(track.colorPrimaries ?? "") colorPrimaries: \(track.transferFunction ?? "") yCbCrMatrix: \(track.yCbCrMatrix ?? "") codecType:  \(track.mediaSubType.rawValue.string)")
+                print("video name: \(track.name) bitRate: \(track.bitRate) fps: \(track.nominalFrameRate) colorPrimaries: \(track.colorPrimaries ?? "") colorPrimaries: \(track.transferFunction ?? "") yCbCrMatrix: \(track.yCbCrMatrix ?? "") codecType:  \(track.mediaSubType.rawValue.string)")
             }
         }
     }
@@ -96,21 +98,42 @@ class MEOptions: KSOptions {
     override func process(assetTrack: some MediaPlayerTrack) {
         if assetTrack.mediaType == .video {
             if [FFmpegFieldOrder.bb, .bt, .tt, .tb].contains(assetTrack.fieldOrder) {
-                videoFilters.append("yadif=mode=1:parity=-1:deint=0")
-                hardwareDecode = false
+                videoFilters.append("yadif_videotoolbox=mode=0:parity=-1:deint=1")
+                asynchronousDecompression = false
             }
+            #if os(tvOS) || os(xrOS)
+            runOnMainThread { [weak self] in
+                guard let self else {
+                    return
+                }
+                if let displayManager = UIApplication.shared.windows.first?.avDisplayManager,
+                   displayManager.isDisplayCriteriaMatchingEnabled
+                {
+                    let refreshRate = assetTrack.nominalFrameRate
+                    if KSOptions.displayCriteriaFormatDescriptionEnabled, let formatDescription = assetTrack.formatDescription, #available(tvOS 17.0, *) {
+                        displayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: refreshRate, formatDescription: formatDescription)
+                    } else {
+                        if let dynamicRange = assetTrack.dynamicRange {
+                            let videoDynamicRange = self.availableDynamicRange(dynamicRange) ?? dynamicRange
+                            displayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: refreshRate, videoDynamicRange: videoDynamicRange.rawValue)
+                        }
+                    }
+                }
+            }
+            #endif
         }
     }
-
-    #if os(tvOS)
-    override open func preferredDisplayCriteria(refreshRate: Float, videoDynamicRange: Int32) -> AVDisplayCriteria? {
-        AVDisplayCriteria(refreshRate: refreshRate, videoDynamicRange: videoDynamicRange)
-    }
-    #endif
 }
 
 var testObjects: [KSPlayerResource] = {
     var objects = [KSPlayerResource]()
+    if let url = Bundle.main.url(forResource: "test", withExtension: "m3u"), let data = try? Data(contentsOf: url) {
+        let result = data.parsePlaylist()
+        for (name, url, _) in result {
+            objects.append(KSPlayerResource(url: url, options: MEOptions(), name: name))
+        }
+    }
+
     for ext in ["mp4", "mkv", "mov", "h264", "flac", "webm"] {
         guard let urls = Bundle.main.urls(forResourcesWithExtension: ext, subdirectory: nil) else {
             continue
@@ -132,7 +155,7 @@ var testObjects: [KSPlayerResource] = {
                 options.syncDecodeAudio = true
             } else if url.lastPathComponent == "subrip.mkv" {
                 options.asynchronousDecompression = false
-                options.videoFilters.append("yadif_videotoolbox=mode=0:parity=auto:deint=1")
+                options.videoFilters.append("yadif_videotoolbox=mode=0:parity=-1:deint=1")
             }
             objects.append(KSPlayerResource(url: url, options: options, name: url.lastPathComponent))
         }
